@@ -1,9 +1,12 @@
 // mrtoggle_overlay — SteamVR dashboard overlay: chroma-key on/off, key colour,
-// similarity / edge softness / spill, passthrough brightness.  Public OpenVR overlay API only.
+// similarity / edge softness / spill, passthrough brightness, bottom area / strip / trapezoid.
+// Public OpenVR overlay API only.
 //
 // Drives the same scripts as the PC panel:
 //   mrtoggle.sh toggle|status                  on/off (keeps the generated shader)
-//   mrkey.sh chroma R G B thr soft spill       regenerate + hot-reload (turns keying on)
+//   mrkey.sh chroma R G B thr soft spill [x0 y0 x1 y1 feather]   regenerate + hot-reload (turns keying on)
+//   mrkey.sh rect x0 y0 x1 y1 0 feather        bottom strip: passthrough over the whole area
+//   mrkey.sh trap x0 y0 x1 y1 angleL angleR feather   trapezoid: strip with slanted sides (degrees)
 // and polls mrtoggle.sh status / mrkey.state so PC-side changes show up here.
 // The UI is software-rendered (FreeType text) and uploaded with SetOverlayRaw.
 #include <openvr.h>
@@ -27,13 +30,17 @@
 using namespace vr;
 using Clock = std::chrono::steady_clock;
 
-static const int W = 1024, H = 930;
+static const int W = 1024, H = 1320;
 
 // ---------------------------------------------------------------- settings
 struct Key {
     float r = 0, g = 1, b = 0;
     float thr = 0.32f, soft = 0.12f, spill = 0.5f;
     float bright = 1.0f;   // passthrough brightness (mrkey.sh passthru), not part of the key shader
+    float area = 1.0f;     // bottom fraction of the view: chroma keys only there, strip/trap show passthrough there
+    float feather = 0.03f; // soft edge of that area
+    float angleL = 0, angleR = 0;  // trapezoid side angles in degrees from the vertical; positive narrows the top
+    int mode = 0;          // 0: chroma key, 1: bottom strip (mrkey.sh rect), 2: trapezoid (mrkey.sh trap)
 };
 struct Range { const char *label; float Key::*field; float lo, hi; };
 static const Range kSliders[] = {
@@ -41,8 +48,22 @@ static const Range kSliders[] = {
     {"Edge softness", &Key::soft, 0.005f, 0.30f},
     {"Spill removal", &Key::spill, 0.0f, 1.0f},
     {"Passthrough", &Key::bright, 0.5f, 2.5f},
+    {"Area (bottom)", &Key::area, 0.05f, 1.0f},
+    {"Area feather", &Key::feather, 0.0f, 0.15f},
+    {"Left angle", &Key::angleL, 0.0f, 45.0f},
+    {"Right angle", &Key::angleR, 0.0f, 45.0f},
 };
-static const int kNumSliders = 4, kBrightSlider = 3;
+static const int kNumSliders = 8, kBrightSlider = 3;
+// Shader UV y runs top (0) to bottom (1); flip if the strip shows up at the top of the view.
+// Keep in step with Y_DOWN in pc/mrchroma_panel.pyw.
+static const bool kYDown = true;
+static float areaOf(float y0, float y1) { return std::clamp(kYDown ? 1 - y0 : y1, 0.05f, 1.0f); }
+static std::string areaArgs(const Key &k) {   // "x0 y0 x1 y1" of the bottom area
+    char buf[64];
+    if (kYDown) snprintf(buf, sizeof buf, "0 %.4f 1 1", 1 - k.area);
+    else snprintf(buf, sizeof buf, "0 0 1 %.4f", k.area);
+    return buf;
+}
 // keyed view draws the camera at opacity 0.6 vs 1.0 in pass-only; this gain matches them
 static const char *kPassthruGain = "1.6667";
 struct Preset { const char *name; float r, g, b; };
@@ -100,15 +121,39 @@ static void syncSceneAlpha() {
     fprintf(stderr, "forceSceneAlphaBlending -> %d (%s)\n", want, want ? "streaming" : "standalone");
 }
 
+// mrkey.state: "chroma R G B thr soft spill [x0 y0 x1 y1 [feather]]", "rect x0 y0 x1 y1 [invert [feather]]"
+// or "trap x0 y0 x1 y1 angleL angleR [feather]"
 static bool readState(Key &k) {
     FILE *f = fopen(g_state.c_str(), "r");
     if (!f) return false;
-    char mode[32];
-    Key n = k;   // keeps bright, which lives in passthru.state
-    int got = fscanf(f, "%31s %f %f %f %f %f %f", mode, &n.r, &n.g, &n.b, &n.thr, &n.soft, &n.spill);
+    char line[512] = {}, mode[32] = {};
+    bool ok = fgets(line, sizeof line, f) != nullptr;
     fclose(f);
-    if (got == 7 && !strcmp(mode, "chroma")) { k = n; return true; }
-    return false;
+    if (!ok) return false;
+    float v[11];
+    int n = sscanf(line, "%31s %f %f %f %f %f %f %f %f %f %f %f", mode, &v[0], &v[1], &v[2], &v[3], &v[4], &v[5],
+                   &v[6], &v[7], &v[8], &v[9], &v[10]) - 1;
+    Key nk = k;   // keeps bright, which lives in passthru.state; rect/trap keep the colour settings too
+    if (!strcmp(mode, "chroma") && n >= 6) {
+        nk.r = v[0]; nk.g = v[1]; nk.b = v[2]; nk.thr = v[3]; nk.soft = v[4]; nk.spill = v[5];
+        nk.mode = 0;
+        nk.area = n >= 10 ? areaOf(v[7], v[9]) : 1.0f;
+        if (n >= 11) nk.feather = v[10];
+    } else if (!strcmp(mode, "rect") && n >= 4) {
+        nk.mode = 1;
+        nk.area = areaOf(v[1], v[3]);
+        if (n >= 6) nk.feather = v[5];
+    } else if (!strcmp(mode, "trap") && n >= 6) {
+        nk.mode = 2;
+        nk.area = areaOf(v[1], v[3]);
+        nk.angleL = v[4];
+        nk.angleR = v[5];
+        if (n >= 7) nk.feather = v[6];
+    } else {
+        return false;
+    }
+    k = nk;
+    return true;
 }
 
 static void readPassthru(Key &k) {   // "<gain> <brightness>" or "off" (written by mrkey.sh passthru)
@@ -207,8 +252,14 @@ struct Rect { float x0, y0, x1, y1; bool in(float x, float y) const { return x >
 static const Rect kToggle = {664, 28, 996, 128};
 static Rect presetRect(int i) { return {300.f + i * 140, 168, 300.f + i * 140 + 120, 248}; }
 static const Rect kHue = {300, 290, 996, 350};
-static Rect sliderRect(int i) { return {300, 418.f + i * 100, 996, 466.f + i * 100}; }
-static const Rect kBgOn = {300, 806, 644, 872}, kBgOff = {652, 806, 996, 872};
+static Rect sliderRect(int i) {   // the area sliders sit below the mode row; the two angle sliders share a row
+    if (i < 4) return {300, 418.f + i * 100, 996, 418.f + i * 100 + 48};
+    if (i < 6) return {300, 918.f + (i - 4) * 100, 996, 918.f + (i - 4) * 100 + 48};
+    return i == 6 ? Rect{300, 1118, 620, 1166} : Rect{676, 1118, 996, 1166};
+}
+static const Rect kModeChroma = {300, 806, 528, 872}, kModeStrip = {536, 806, 764, 872},
+                  kModeTrap = {772, 806, 996, 872};
+static const Rect kBgOn = {300, 1196, 644, 1262}, kBgOff = {652, 1196, 996, 1262};
 
 // PC home background: wanted state lives on the headset, the PC helper acks what it applied
 struct PcBg { bool on = false; std::string applied; };
@@ -254,7 +305,7 @@ static void render(Canvas &cv, const Key &k, const std::string &status, bool bus
         Rect r = sliderRect(i);
         float v = k.*(s.field), t = (v - s.lo) / (s.hi - s.lo);
         float cy = (r.y0 + r.y1) / 2;
-        cv.text(s.label, 40, int(cy + 12), 34, 0xc8c8c8);
+        cv.text(s.label, i == 7 ? 420 : 40, int(cy + 12), 34, 0xc8c8c8);
         cv.rrect(r.x0, cy - 7, r.x1, cy + 7, 7, 0x3a3c44);
         cv.rrect(r.x0, cy - 7, r.x0 + t * (r.x1 - r.x0), cy + 7, 7, 0x5a9cff);
         cv.circle(r.x0 + t * (r.x1 - r.x0), cy, drag == i ? 24 : 20, 0xf0f0f0);
@@ -262,9 +313,19 @@ static void render(Canvas &cv, const Key &k, const std::string &status, bool bus
         snprintf(buf, sizeof buf, "%.2f", v);
         cv.text(buf, int(r.x1), int(r.y0 - 6), 26, 0x9a9a9a, false, 2);
     }
+    // mode: chroma key inside the area, the whole area as passthrough, or a trapezoid band
+    cv.text("Mode", 40, 852, 34, 0xc8c8c8);
+    for (int i = 0; i < 3; i++) {
+        const Rect &r = i == 0 ? kModeChroma : i == 1 ? kModeStrip : kModeTrap;
+        bool sel = k.mode == i;
+        cv.rrect(r.x0, r.y0, r.x1, r.y1, 18, sel ? 0x2b4f8a : 0x2a2c33);
+        cv.ring(r.x0, r.y0, r.x1, r.y1, 18, sel ? 4 : 2, sel ? 0x8fb8ff : 0x4a4d57);
+        cv.text(i == 0 ? "Chroma key" : i == 1 ? "Bottom strip" : "Trapezoid", (r.x0 + r.x1) / 2, int(r.y1 - 21), 30,
+                sel ? 0xffffff : 0xa0a0a0, sel, 1);
+    }
     // desktop (PC home) background
-    cv.text("Desktop", 40, 834, 34, 0xc8c8c8);
-    cv.text("background", 40, 870, 34, 0xc8c8c8);
+    cv.text("Desktop", 40, 1224, 34, 0xc8c8c8);
+    cv.text("background", 40, 1260, 34, 0xc8c8c8);
     for (int i = 0; i < 2; i++) {
         const Rect &r = i == 0 ? kBgOn : kBgOff;
         bool sel = (i == 0) == bg.on;
@@ -275,7 +336,7 @@ static void render(Canvas &cv, const Key &k, const std::string &status, bool bus
                 sel ? 0xffffff : 0xa0a0a0, sel, 1);
     }
     const char *st = sync == SyncOk ? "PC in sync" : sync == SyncWaiting ? "waiting for PC..." : "PC helper not responding";
-    cv.text(st, 996, 800, 22, sync == SyncOk ? 0x5ae678 : sync == SyncWaiting ? 0xe0b050 : 0xeb5f55, false, 2);
+    cv.text(st, 996, 1190, 22, sync == SyncOk ? 0x5ae678 : sync == SyncWaiting ? 0xe0b050 : 0xeb5f55, false, 2);
     cv.text(on ? "Changes apply when you release the trigger"
                : "Changing colour or sliders turns keying back on", W / 2, H - 22, 24, 0x80838c, false, 1);
 }
@@ -389,9 +450,18 @@ int main(int argc, char **argv) {
         busy = true;
     };
     auto applyKey = [&] {
-        char buf[256];
-        snprintf(buf, sizeof buf, "%s chroma %.4f %.4f %.4f %.4f %.4f %.4f", g_mrkey.c_str(), key.r, key.g, key.b,
-                 key.thr, key.soft, key.spill);
+        char buf[384];
+        std::string area = areaArgs(key);
+        if (key.mode == 1) {
+            snprintf(buf, sizeof buf, "%s rect %s 0 %.4f", g_mrkey.c_str(), area.c_str(), key.feather);
+        } else if (key.mode == 2) {
+            snprintf(buf, sizeof buf, "%s trap %s %.1f %.1f %.4f", g_mrkey.c_str(), area.c_str(), key.angleL,
+                     key.angleR, key.feather);
+        } else {
+            int n = snprintf(buf, sizeof buf, "%s chroma %.4f %.4f %.4f %.4f %.4f %.4f", g_mrkey.c_str(), key.r, key.g,
+                             key.b, key.thr, key.soft, key.spill);
+            if (key.area < 0.999f) snprintf(buf + n, sizeof buf - n, " %s %.4f", area.c_str(), key.feather);
+        }
         submit(buf);
     };
 
@@ -441,6 +511,10 @@ int main(int argc, char **argv) {
                     status = "on";
                 } else if (kToggle.in(x, y)) {
                     submit(g_toggle + " toggle");
+                } else if (kModeChroma.in(x, y) || kModeStrip.in(x, y) || kModeTrap.in(x, y)) {
+                    key.mode = kModeStrip.in(x, y) ? 1 : kModeTrap.in(x, y) ? 2 : 0;
+                    applyKey();
+                    status = "on";
                 } else if (kBgOn.in(x, y) || kBgOff.in(x, y)) {
                     bg.on = kBgOn.in(x, y);
                     submit(g_toggle + (bg.on ? " bg on" : " bg off"));

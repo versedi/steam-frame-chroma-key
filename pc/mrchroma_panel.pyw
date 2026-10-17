@@ -16,7 +16,16 @@ from tkinter import colorchooser, ttk
 
 HOST = "frame"
 SETTINGS = os.path.join(os.environ.get("APPDATA", "."), "mrchroma_panel.json")
-DEFAULTS = {"mode": "chroma", "rgb": [0, 255, 0], "threshold": 0.32, "softness": 0.12, "spill": 0.5}
+DEFAULTS = {"mode": "chroma", "rgb": [0, 255, 0], "threshold": 0.32, "softness": 0.12, "spill": 0.5,
+            "area": 1.0, "feather": 0.03, "angleL": 0.0, "angleR": 0.0}
+# Shader UV y runs top (0) to bottom (1); flip if the strip shows up at the top of the view.
+# Keep in step with kYDown in toggle/mrtoggle_overlay.cpp.
+Y_DOWN = True
+
+
+def area_rect(area):
+    """Bottom `area` fraction of each eye image as 'x0 y0 x1 y1'."""
+    return f"0 {1 - area:.4f} 1 1" if Y_DOWN else f"0 0 1 {area:.4f}"
 
 try:  # physical pixel coordinates for the eyedropper on scaled displays
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
@@ -50,7 +59,8 @@ class Panel:
         self.mode = tk.StringVar(value=self.s["mode"])
         mf = ttk.Frame(f)
         mf.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
-        for i, (lbl, val) in enumerate([("Off", "off"), ("Chroma key", "chroma"), ("Rect test", "rect")]):
+        for i, (lbl, val) in enumerate([("Off", "off"), ("Chroma key", "chroma"), ("Bottom strip", "rect"),
+                                        ("Trapezoid", "trap")]):
             ttk.Radiobutton(mf, text=lbl, value=val, variable=self.mode, command=self.changed).grid(row=0, column=i, padx=4)
 
         ttk.Label(f, text="Key colour").grid(row=1, column=0, sticky="w")
@@ -65,7 +75,9 @@ class Panel:
 
         self.vars = {}
         rows = [("threshold", "Similarity", 0.02, 0.70), ("softness", "Edge softness", 0.005, 0.30),
-                ("spill", "Spill removal", 0.0, 1.0)]
+                ("spill", "Spill removal", 0.0, 1.0), ("area", "Area (bottom)", 0.05, 1.0),
+                ("feather", "Area feather", 0.0, 0.15), ("angleL", "Left angle (deg)", 0.0, 45.0),
+                ("angleR", "Right angle (deg)", 0.0, 45.0)]
         for i, (k, lbl, lo, hi) in enumerate(rows):
             ttk.Label(f, text=lbl).grid(row=3 + i, column=0, sticky="w", pady=4)
             v = tk.DoubleVar(value=self.s[k])
@@ -78,7 +90,10 @@ class Panel:
             val.config(text=f"{v.get():.3f}")
 
         self.status = ttk.Label(f, text="ready", foreground="#555", wraplength=360)
-        self.status.grid(row=7, column=0, columnspan=4, sticky="w", pady=(10, 0))
+        ttk.Label(f, text="Area: chroma keys only inside it; strip/trapezoid shows passthrough in all of it. "
+                          "Angles slant the trapezoid's sides, 0 = straight strip.",
+                  foreground="#555", wraplength=360).grid(row=3 + len(rows), column=0, columnspan=4, sticky="w")
+        self.status.grid(row=4 + len(rows), column=0, columnspan=4, sticky="w", pady=(10, 0))
         self.refresh_swatch()
 
     # ---------------------------------------------------------------- ui
@@ -132,11 +147,15 @@ class Panel:
         except Exception:
             pass
         r, g, b = (c / 255.0 for c in self.s["rgb"])
-        m = self.s["mode"]
+        m, area, fe = self.s["mode"], self.s["area"], self.s["feather"]
         if m == "chroma":
             args = f"chroma {r:.4f} {g:.4f} {b:.4f} {self.s['threshold']} {self.s['softness']} {self.s['spill']}"
+            if area < 0.999:
+                args += f" {area_rect(area)} {fe}"
         elif m == "rect":
-            args = "rect 0.3 0.3 0.7 0.7"
+            args = f"rect {area_rect(area)} 0 {fe}"
+        elif m == "trap":
+            args = f"trap {area_rect(area)} {self.s['angleL']:.1f} {self.s['angleR']:.1f} {fe}"
         else:
             args = "off"
         self.jobs.put(args)

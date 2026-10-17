@@ -1,9 +1,13 @@
 #!/bin/bash
 # mrkey — switch the compositor scene shader between stock / rect test / chroma key.
 #   mrkey.sh off
-#   mrkey.sh rect   [x0 y0 x1 y1 [invert]]          (normalized eye coords, default 0.3 0.3 0.7 0.7)
-#   mrkey.sh chroma [R G B threshold softness spill] (default 0 1 0 0.18 0.10 0.5)
-#   mrkey.sh passthru <gain>|off                     (passthrough brightness, see below)
+#   mrkey.sh rect   [x0 y0 x1 y1 [invert [feather]]]  (passthrough inside; normalized eye coords, default 0.3 0.3 0.7 0.7)
+#   mrkey.sh trap   [x0 y0 x1 y1 [angleL angleR [feather]]]
+#                   (passthrough inside a trapezoid; angles in degrees from the vertical,
+#                    positive narrows the top; default 0 0.65 1 1 0 0)
+#   mrkey.sh chroma [R G B threshold softness spill [x0 y0 x1 y1 [feather]]]
+#                   (default 0 1 0 0.18 0.10 0.5; with a rect, keys only inside it)
+#   mrkey.sh passthru <gain>|off                       (passthrough brightness, see below)
 # Requires: install.sh done, ~/.config/mrchroma/enable-compositor present and
 # vrcompositor started with the layer.  Applies live via shader reload.
 set -euo pipefail
@@ -46,12 +50,17 @@ case "$mode" in
     spirv-dis "$ORIG" -o "$STATE/orig_se2.spvasm"
     python3 tools/gen_key_spv.py "$STATE/orig_se2.spvasm" "$OUT.new" rect "$@"
     mv "$OUT.new" "$OUT" ;;
+  trap)
+    [[ $# -ge 6 ]] || set -- 0 0.65 1 1 0 0
+    spirv-dis "$ORIG" -o "$STATE/orig_se2.spvasm"
+    python3 tools/gen_key_spv.py "$STATE/orig_se2.spvasm" "$OUT.new" trap "$@"
+    mv "$OUT.new" "$OUT" ;;
   chroma)
     [[ $# -ge 6 ]] || set -- 0 1 0 0.18 0.10 0.5
     spirv-dis "$ORIG" -o "$STATE/orig_se2.spvasm"
     python3 tools/gen_key_spv.py "$STATE/orig_se2.spvasm" "$OUT.new" chroma "$@"
     mv "$OUT.new" "$OUT" ;;
-  *) sed -n '2,6p' "$0"; exit 2 ;;
+  *) sed -n '2,10p' "$0"; exit 2 ;;
 esac
 if [[ "$mode" != off ]] && ! grep -q "^override = $SHADER " "$CONF"; then
   echo "override = $SHADER $OUT" >> "$CONF"

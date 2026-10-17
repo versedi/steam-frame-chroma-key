@@ -108,7 +108,8 @@ Your settings persist across SteamVR restarts and reboots.
 
 ### 4. PC tools (optional)
 
-From a copy of this repo on the PC:
+From a copy of this repo on the PC, in PowerShell or cmd with Windows Python (not WSL: the helper manages the
+Windows Startup folder and SteamVR settings):
 
 - **Desktop background sync.** This makes the panel's *Desktop background* switch work. It runs hidden at login:
 
@@ -133,6 +134,15 @@ From a copy of this repo on the PC:
    - **Spill removal** removes the coloured fringe the key colour leaves on edges.
    - **Passthrough** sets the brightness of the room behind the game (1.00 = SteamVR's normal brightness;
      higher is brighter).
+   - **Mode**: *Chroma key* keys the key colour; *Bottom strip* ignores colour and shows passthrough over the
+     whole area below — for example your real wheel, dashboard and hands in a sim-racing cockpit. *Trapezoid*
+     is the same strip with slanted sides: **Left/Right angle** slant each side in degrees from the vertical
+     (positive narrows the top), matching the perspective of the cockpit as you see it from the driver's seat.
+   - **Area (bottom)** is the part of the view, measured up from the bottom, that the mode applies to. With
+     *Chroma key*, the key colour is only keyed inside it (1.00 = whole view); with *Bottom strip* or
+     *Trapezoid*, all of it is passthrough. **Area feather** softens its top edge.
+
+     The area is a band of your view, not a place in the room: it moves with your head.
    - **Desktop background**: *Key colour* shows passthrough around the SteamVR desktop view when no game is running,
      and *Mountains* restores the normal SteamVR home. This needs the PC sync helper. The panel shows *PC in sync*,
      *waiting for PC* or *PC helper not responding*.
@@ -144,10 +154,18 @@ From a shell on the headset you can do the same things:
 ```bash
 ~/mr-chroma/mrtoggle.sh on|off|toggle|status       # keying on/off, keeps the last colour/settings
 ~/mr-chroma/mrkey.sh chroma R G B sim soft spill   # set colour + params (0..1 values)
+~/mr-chroma/mrkey.sh chroma R G B sim soft spill x0 y0 x1 y1 feather   # ...keyed only inside that rect
+~/mr-chroma/mrkey.sh rect 0 0.65 1 1 0 0.05        # bottom 35% passthrough, 0.05 feathered edge
+~/mr-chroma/mrkey.sh trap 0 0.65 1 1 12 8 0.03     # same band with sides slanted in 12/8 degrees
 ~/mr-chroma/mrkey.sh passthru 1.6667 <brightness> # passthrough brightness (1 = normal), "off" = stock
 ~/mr-chroma/mrkey.sh rect                          # debug: key a fixed rectangle in the middle of each eye
 ~/mr-chroma/mrtoggle.sh bg on|off|toggle|status    # PC desktop background: key colour / mountains
 ```
+
+Rect coordinates are normalized per eye image, `x0 y0 x1 y1`, with y = 0 at the top. `rect` takes
+`[invert [feather]]` after them (invert = passthrough outside instead of inside). Edges at 0 or 1 are not feathered.
+`trap` takes `angleL angleR` after the rect (degrees from the vertical, positive narrows the top edge;
+0 0 = the plain strip) and an optional feather.
 
 ## Uninstall
 
